@@ -1,0 +1,21 @@
+# keys / secrets - never commit
+keys/
+*.pem
+*.key
+.env
+.env.*
+# python / test artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+# node example
+node_modules/
+package-lock.json
+# example inputs / outputs
+input.png
+*.tar.gz
+*.zip
+.DS_Store
+Thumbs.db
