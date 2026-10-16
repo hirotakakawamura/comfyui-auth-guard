@@ -3,7 +3,7 @@
 
   python issue_token.py keygen --out keys/            # writes private.pem (keep secret) + public.pem
   python issue_token.py gui-hash                      # prompts, prints COMFY_AUTH_GUI_PASSWORD_HASH
-  python issue_token.py issue --key keys/private.pem --aud comfyui --sub alice [--ttl 60] [--scope generate] [--iss webapp]
+  python issue_token.py issue --key keys/private.pem --aud comfyui --sub alice [--ttl 60] [--scope generate] [--iss my-backend]
 """
 import argparse, os, secrets, sys, time
 # PyJWT/cryptography are imported lazily so that `gui-hash` works with the stdlib only.
@@ -26,7 +26,7 @@ def keygen(out):
         f.write(priv)
     with open(os.path.join(out, "public.pem"), "wb") as f:
         f.write(pub)
-    print(f"wrote {p} (secret, web app only) and {os.path.join(out, 'public.pem')} (ComfyUI)", file=sys.stderr)
+    print(f"wrote {p} (secret: keep it on the client/backend only) and {os.path.join(out, 'public.pem')} (ComfyUI)", file=sys.stderr)
 
 
 def issue(key_path, aud, sub, ttl=60, scope=None, iss=None):

@@ -163,10 +163,10 @@ async def test_ed25519_jwt(aiohttp_client):
 
 
 async def test_iss_required(aiohttp_client):
-    c = await aiohttp_client(make_app({**JENV, "COMFY_AUTH_JWT_ISS": "webapp"}))
+    c = await aiohttp_client(make_app({**JENV, "COMFY_AUTH_JWT_ISS": "my-backend"}))
     assert (await c.get("/system_stats", headers=B(ed()))).status == 401
     assert (await c.get("/system_stats", headers=B(ed(iss="evil")))).status == 401
-    assert (await c.get("/system_stats", headers=B(ed(iss="webapp")))).status == 200
+    assert (await c.get("/system_stats", headers=B(ed(iss="my-backend")))).status == 200
 
 
 async def test_replay_and_store_full(aiohttp_client):
@@ -483,7 +483,7 @@ import auth_guard as _ag
 
 def _jwt_tok(scope="generate"):
     now = int(time.time())
-    return jwt.encode({"aud": "comfyui", "sub": "localui", "iat": now, "exp": now + 60,
+    return jwt.encode({"aud": "comfyui", "sub": "my-backend", "iat": now, "exp": now + 60,
                        "jti": os.urandom(8).hex(), "scope": scope}, ED, algorithm="EdDSA")
 
 
@@ -497,7 +497,7 @@ async def test_success_not_logged_at_info(aiohttp_client, caplog):
     assert not [m for m in caplog.messages if "jwt sub=" in m]
     with caplog.at_level(_logging.DEBUG, logger="comfyui-auth-guard"):
         await c.get("/system_stats", headers={"Authorization": "Bearer " + _jwt_tok()})
-    assert any("jwt sub=localui" in m for m in caplog.messages)
+    assert any("jwt sub=my-backend" in m for m in caplog.messages)
 
 
 def test_rate_limited_log(caplog):

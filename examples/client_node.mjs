@@ -13,7 +13,7 @@ const key = await importPKCS8(await readFile(process.env.COMFY_PRIVKEY ?? "keys/
 async function auth() {
   const t = await new SignJWT({ scope: "generate" })
     .setProtectedHeader({ alg: "EdDSA", typ: "JWT" })
-    .setSubject("webapp-user-1").setAudience(AUD)
+    .setSubject("my-backend").setAudience(AUD)
     .setIssuedAt().setExpirationTime("60s").setJti(randomUUID())
     .sign(key);
   return { Authorization: `Bearer ${t}` };

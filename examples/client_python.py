@@ -15,7 +15,7 @@ with open(os.environ.get("COMFY_PRIVKEY", "keys/private.pem"), "rb") as f:
 def auth():
     """New token for EVERY request (jti is single-use)."""
     now = int(time.time())
-    tok = jwt.encode({"aud": AUD, "sub": "webapp-user-1", "iat": now, "exp": now + 60,
+    tok = jwt.encode({"aud": AUD, "sub": "my-backend", "iat": now, "exp": now + 60,
                       "jti": secrets.token_urlsafe(16), "scope": "generate"}, KEY, algorithm="EdDSA")
     return {"Authorization": f"Bearer {tok}"}
 
