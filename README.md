@@ -226,6 +226,7 @@ python main.py --listen 127.0.0.1
 | `COMFY_AUTH_COOKIE_SECURE` | `auto` `1` `0` | `auto` | — | Cookie の Secure 属性 |
 | `COMFY_AUTH_ALLOWED_ORIGINS` | `https://a.example,...` | なし | — | 自分の Host 以外に許可する Origin |
 | `COMFY_AUTH_TRUST_CF_IP` | 真偽 | `0` | — | ログイン回数制限に `CF-Connecting-IP` を使う |
+| `COMFY_AUTH_LOG_LEVEL` | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` | — | このノードのログだけの出力レベル（[ログ](#ログ)）。不正な値は警告を出して `INFO` |
 
 設定値が不正（範囲外・片方だけ・読めない鍵など）な場合は、すべて**503 で全拒否**になり、ログに `config error: ...` が出ます。
 
@@ -378,6 +379,13 @@ Node 20 では Ed25519 について `ExperimentalWarning` が出ますが動作�
 - **総当たり対策**：IPごとに5回まで待ちなし、以降 2,4,8…秒（最大15分）ロック（正しいパスワードでも 429）。全体で60秒に50回を超える失敗があれば60秒間全ログイン停止
 - **重要**：正しい Cookie セッションは `COMFY_AUTH_MODE` の条件（`all` を含む）を満たしたものとして扱います。Access の守りも残したい場合は Cloudflare 側でホスト全体を Access で保護してください
 
+### ログ
+- ロガー名は `comfyui-auth-guard` です。独自の出力先は持たず、ComfyUI のログ設定（コンソール・`comfyui_detail.log` 等）にそのまま流れるので、二重に表示されることはありません。`COMFY_AUTH_LOG_LEVEL` はこのロガーにだけ効き、ComfyUI 本体のログレベルは変えません。
+- **成功したリクエストは INFO では記録しません**。JWT の `sub` / `scope` は `DEBUG` で出ます（ComfyUI のコンソールに出すには ComfyUI 側も `--verbose DEBUG` が必要です）。
+- **拒否のログは理由ごとに 60 秒に 1 行まで**にまとめます。抑えた件数は次の行に `(+N similar suppressed in last 60s)` と付きます。対象：未認証の拒否（INFO）、WebSocket チケットの拒否（INFO）、チケットの主体不一致・Origin 不一致・CF/JWT の検証失敗・GUI ログイン失敗（WARNING）。
+- 起動時のメッセージ・設定エラー・ログインのロックアウトは、まとめずに毎回出します。
+- `COMFY_AUTH_LOG_LEVEL=WARNING` 以上にすると、起動確認の `[auth-guard] enabled`（INFO）も出なくなります。動作確認のときは `INFO` にしてください。
+
 ## 9. テスト
 ```bash
 pip install "pyjwt[crypto]" pytest pytest-aiohttp
@@ -388,7 +396,9 @@ cd tests && python -m pytest -v                         # 単体テスト（Comf
 ## 10. トラブルシューティング
 | 症状 | 原因と対処 |
 |---|---|
-| 起動ログに `[auth-guard] enabled` がない | 読み込み失敗（**認証なしで動いています**）。`IMPORT FAILED` の行と直前のエラーを確認。`pyjwt[crypto]` を ComfyUI と同じ Python に入れたか確認 |
+| コンソールが `[auth-guard] jwt sub=... scope=...` で埋まる | 古い版です。最新版では成功時のログは `DEBUG` だけに出ます。拒否のログも 60 秒に 1 行にまとめます |
+| ログをもっと減らしたい | `COMFY_AUTH_LOG_LEVEL=WARNING`（起動確認の `enabled` 行も消えるので注意） |
+| 起動ログに `[auth-guard] enabled` がない | `COMFY_AUTH_LOG_LEVEL` が `WARNING` 以上なら表示されないだけです。そうでなければ 読み込み失敗（**認証なしで動いています**）。`IMPORT FAILED` の行と直前のエラーを確認。`pyjwt[crypto]` を ComfyUI と同じ Python に入れたか確認 |
 | すべて 503 | `config error: ...` のログを確認。数値の環境変数に数字以外を入れた・未設定・トークン31文字以下・AUD 不足・公開鍵が読めない、など |
 | 1回目は 200、同じトークンで2回目が 401 | `jti` の使い回し。リクエストごとに JWT を作る |
 | JWT がいつも 401 | ログの理由を確認：`ExpiredSignatureError`（期限切れ・時計ずれ）、`InvalidAudienceError`（aud不一致）、`ImmatureSignatureError`（iat が未来）、`InvalidAlgorithmError`（alg が EdDSA でない）、`ttl too long`（`exp-iat` が長すぎ）、`InvalidSignatureError`（鍵ペア違い） |

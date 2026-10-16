@@ -71,6 +71,18 @@ start COMFY_AUTH_TOKEN=$T COMFY_AUTH_MAX_TTL=abc
 echo "/system_stats correct token: $(c -H "Authorization: Bearer $T" $U/system_stats)"
 stop
 
+echo "== logging flood check =="
+: >/tmp/comfy_it_log2.log; cp /tmp/comfy_it.log /tmp/comfy_it.before
+start COMFY_AUTH_PUBKEY_PATH=$K/public.pem COMFY_AUTH_JWT_AUD=comfyui
+for i in $(seq 20); do c -H "Authorization: Bearer $(J)" $U/system_stats >/dev/null; c $U/system_stats >/dev/null; done
+stop
+tail -n +$(( $(wc -l </tmp/comfy_it.before) + 1 )) /tmp/comfy_it.log >/tmp/comfy_it_log2.log
+echo "20 ok + 20 denied -> 'jwt sub=' lines: $(grep -c 'jwt sub=' /tmp/comfy_it_log2.log)  'denied GET' lines: $(grep -c 'denied GET' /tmp/comfy_it_log2.log)"
+start COMFY_AUTH_PUBKEY_PATH=$K/public.pem COMFY_AUTH_JWT_AUD=comfyui COMFY_AUTH_LOG_LEVEL=WARNING
+c $U/system_stats >/dev/null
+stop
+echo "LOG_LEVEL=WARNING -> 'enabled' line after start: $(tail -n 40 /tmp/comfy_it.log | grep -c 'auth-guard\] enabled')  denied lines: $(tail -n 40 /tmp/comfy_it.log | grep -c 'denied GET')"
+
 echo "== no config (fail closed) =="
 start
 echo "/system_stats: $(c -H "Authorization: Bearer $T" $U/system_stats)"

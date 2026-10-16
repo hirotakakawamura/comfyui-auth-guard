@@ -17,6 +17,47 @@ except ImportError:
     import gui as G
 
 log = logging.getLogger("comfyui-auth-guard")
+# No handler is attached here: records propagate to ComfyUI's root handler (no double printing).
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+
+class RateLimitedLog:
+    """At most one line per reason key per `interval` s; the next line reports how many were suppressed.
+    Keys are a small fixed set of reasons (never client-controlled), so memory stays bounded."""
+    def __init__(self, logger, interval=60.0, clock=time.monotonic):
+        self.logger, self.interval, self.clock = logger, interval, clock
+        self.state = {}         # key -> [last_emit, suppressed]
+        self.lock = threading.Lock()
+
+    def __call__(self, level, key, msg, *args):
+        if not self.logger.isEnabledFor(level):
+            return
+        now = self.clock()
+        with self.lock:
+            st = self.state.get(key)
+            if st is not None and now - st[0] < self.interval:
+                st[1] += 1
+                return
+            suppressed = st[1] if st else 0
+            self.state[key] = [now, 0]
+        if suppressed:
+            msg += " (+%d similar suppressed in last %ds)"
+            args = args + (suppressed, int(self.interval))
+        self.logger.log(level, msg, *args)
+
+
+rlog = RateLimitedLog(log)
+
+
+def apply_log_level(env=None):
+    """COMFY_AUTH_LOG_LEVEL on this module's logger only. Invalid -> warning + INFO (not security relevant)."""
+    env = os.environ if env is None else env
+    raw = env.get("COMFY_AUTH_LOG_LEVEL", "").strip().upper()
+    level = raw if raw in LOG_LEVELS else "INFO"
+    log.setLevel(level)
+    if raw and raw not in LOG_LEVELS:
+        log.warning("[auth-guard] invalid COMFY_AUTH_LOG_LEVEL=%r, using INFO", raw[:20])
+    return level
 
 try:
     import jwt  # PyJWT
@@ -251,7 +292,7 @@ class Guard:
                            options={"require": ["exp", "iat", "iss", "aud"]}, leeway=30)
             return "cf:" + str(c.get("email") or c.get("common_name") or c.get("sub"))
         except Exception as e:  # never log the token itself
-            log.warning("[auth-guard] CF Access JWT rejected: %s", type(e).__name__)
+            rlog(logging.WARNING, "cf:" + type(e).__name__, "[auth-guard] CF Access JWT rejected: %s", type(e).__name__)
             return None
 
     def check_jwt(self, request):
@@ -279,14 +320,14 @@ class Guard:
             if not jti or not self.seen_jti.add_new(jti, c["exp"] + cfg.leeway):
                 raise jwt.InvalidTokenError("replay or jti store full")
         except Exception as e:
-            log.warning("[auth-guard] signed JWT rejected: %s (%s)", type(e).__name__,
-                        e.args[0] if isinstance(e, jwt.InvalidTokenError) and e.args and
-                        e.args[0] in ("ttl too long", "replay or jti store full", "alg", "iat in future") else "-")
+            why = (e.args[0] if isinstance(e, jwt.InvalidTokenError) and e.args and
+                   e.args[0] in ("ttl too long", "replay or jti store full", "alg", "iat in future") else "-")
+            rlog(logging.WARNING, "jwt:%s:%s" % (type(e).__name__, why), "[auth-guard] signed JWT rejected: %s (%s)", type(e).__name__, why)
             return None
         sub = str(c.get("sub", ""))
         if "scope" in c:
             request["auth_scope"] = c["scope"]
-            log.info("[auth-guard] jwt sub=%s scope=%s", sub, c["scope"])
+            log.debug("[auth-guard] jwt sub=%s scope=%s", sub, c["scope"])
         return "jwt:" + sub
 
     async def authenticate(self, request):
@@ -346,13 +387,13 @@ class Guard:
                 return _deny("ticket only valid for websocket")
             subject = self.redeem_ticket(ticket)
             if subject is None:
-                log.info("[auth-guard] denied ws ticket from %s", request.remote)
+                rlog(logging.INFO, "ws-ticket", "[auth-guard] denied ws ticket from %s", request.remote)
                 return _deny()
             # bound to subject: if the request carries a CF identity it must match
             if "cf" in cfg.methods and request.headers.get("Cf-Access-Jwt-Assertion"):
                 cf_id = await self.check_cf(request)
                 if not cf_id or cf_id not in subject.split("|"):
-                    log.info("[auth-guard] ws ticket subject mismatch")
+                    rlog(logging.WARNING, "ws-mismatch", "[auth-guard] ws ticket subject mismatch")
                     return _deny()
             request["auth_user"] = subject
             return await handler(request)
@@ -369,10 +410,10 @@ class Guard:
         if not identity:
             identity = await self.authenticate(request)
         if not identity and bad_origin:
-            log.info("[auth-guard] cookie request with bad origin: %s %s", request.method, request.path)
+            rlog(logging.WARNING, "cookie-origin", "[auth-guard] cookie request with bad origin: %s %s", request.method, request.path)
             return web.json_response({"error": "origin check failed"}, status=403)
         if not identity:
-            log.info("[auth-guard] denied %s %s from %s", request.method, request.path, request.remote)
+            rlog(logging.INFO, "denied", "[auth-guard] denied %s %s from %s", request.method, request.path, request.remote)
             if (cfg.gui == "login" and request.method == "GET" and not _is_ws(request)
                     and "text/html" in request.headers.get("Accept", "")):
                 return G.redirect_to_login(request)
@@ -397,7 +438,7 @@ async def _handle_login(self, request):
     if request.method != "POST":
         return web.json_response({"error": "method not allowed"}, status=405)
     if not G.origin_ok(request, cfg.allowed_origins):
-        log.info("[auth-guard] login with bad origin from %s", request.remote)
+        rlog(logging.WARNING, "login-origin", "[auth-guard] login with bad origin from %s", request.remote)
         return web.json_response({"error": "origin check failed"}, status=403)
     ip = G.client_ip(request, cfg.trust_cf_ip)
     wait = self.limiter.retry_after(ip)
@@ -414,7 +455,7 @@ async def _handle_login(self, request):
     ok = await asyncio.to_thread(G.verify_password, pw, cfg.gui_hash)
     if not ok:
         self.limiter.fail(ip)
-        log.warning("[auth-guard] GUI login failed from %s", ip)
+        rlog(logging.WARNING, "login-failed", "[auth-guard] GUI login failed from %s", ip)
         return G.login_page(nxt, "パスワードが違います。", status=401)
     self.limiter.success(ip)
     old = self.sessions.validate(request.cookies.get(G.COOKIE))
@@ -457,6 +498,7 @@ async def deny_all_middleware(request, handler):
 
 def install(app: web.Application, cfg: Config = None) -> Guard:
     """Insert the guard as the OUTERMOST middleware. Must run before the app is frozen."""
+    apply_log_level()
     cfg = cfg or load_config()
     guard = Guard(cfg)
     if cfg.disabled:

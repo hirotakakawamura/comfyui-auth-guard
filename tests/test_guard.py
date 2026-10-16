@@ -474,3 +474,64 @@ def test_keygen_refuses_overwrite(tmp_path):
         assert (tmp_path / "private.pem").stat().st_mode & 0o077 == 0
     r2 = subprocess.run([sys.executable, str(tool), "keygen", "--out", str(tmp_path)], capture_output=True)
     assert r2.returncode != 0
+
+
+# ---- logging ------------------------------------------------------------------
+import logging as _logging
+import auth_guard as _ag
+
+
+def _jwt_tok(scope="generate"):
+    now = int(time.time())
+    return jwt.encode({"aud": "comfyui", "sub": "localui", "iat": now, "exp": now + 60,
+                       "jti": os.urandom(8).hex(), "scope": scope}, ED, algorithm="EdDSA")
+
+
+async def test_success_not_logged_at_info(aiohttp_client, caplog):
+    _ag.apply_log_level({})
+    c = await aiohttp_client(make_app(JENV))
+    with caplog.at_level(_logging.INFO, logger="comfyui-auth-guard"):
+        for _ in range(3):
+            r = await c.get("/system_stats", headers={"Authorization": "Bearer " + _jwt_tok()})
+            assert r.status == 200
+    assert not [m for m in caplog.messages if "jwt sub=" in m]
+    with caplog.at_level(_logging.DEBUG, logger="comfyui-auth-guard"):
+        await c.get("/system_stats", headers={"Authorization": "Bearer " + _jwt_tok()})
+    assert any("jwt sub=localui" in m for m in caplog.messages)
+
+
+def test_rate_limited_log(caplog):
+    t = [0.0]
+    lg = _logging.getLogger("comfyui-auth-guard.test-rl"); lg.setLevel(_logging.INFO)
+    rl = _ag.RateLimitedLog(lg, interval=60, clock=lambda: t[0])
+    with caplog.at_level(_logging.INFO, logger=lg.name):
+        for i in range(100):
+            rl(_logging.INFO, "denied", "denied %s", i)
+        rl(_logging.INFO, "other", "other reason")
+        assert [r.getMessage() for r in caplog.records] == ["denied 0", "other reason"]
+        t[0] = 61
+        rl(_logging.INFO, "denied", "denied %s", "late")
+    assert caplog.records[-1].getMessage() == "denied late (+99 similar suppressed in last 60s)"
+
+
+async def test_denials_not_flooding(aiohttp_client, caplog):
+    _ag.rlog.state.clear()
+    c = await aiohttp_client(make_app({"COMFY_AUTH_TOKEN": TOKEN}))
+    with caplog.at_level(_logging.INFO, logger="comfyui-auth-guard"):
+        for _ in range(20):
+            assert (await c.get("/system_stats")).status == 401
+    assert len([m for m in caplog.messages if "denied GET" in m]) == 1
+
+
+@pytest.mark.parametrize("val,expect", [("", "INFO"), ("debug", "DEBUG"), ("WARNING", "WARNING"),
+                                        ("ERROR", "ERROR"), ("loud", "INFO")])
+def test_log_level_env(val, expect, caplog):
+    root_before = _logging.getLogger().level
+    with caplog.at_level(_logging.WARNING, logger="comfyui-auth-guard"):
+        assert _ag.apply_log_level({"COMFY_AUTH_LOG_LEVEL": val}) == expect
+        assert _logging.getLogger("comfyui-auth-guard").level == getattr(_logging, expect)
+    assert _logging.getLogger().level == root_before            # ComfyUI root logger untouched
+    assert not _logging.getLogger("comfyui-auth-guard").handlers  # propagate only: no double print
+    if val == "loud":
+        assert any("invalid COMFY_AUTH_LOG_LEVEL" in m for m in caplog.messages)
+    _ag.apply_log_level({})
